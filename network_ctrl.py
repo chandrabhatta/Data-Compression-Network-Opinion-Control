@@ -5,6 +5,7 @@ import scipy.io as sio
 import cvxpy as cp
 from sklearn.linear_model import OrthogonalMatchingPursuit
 
+
 def load_mat(filename):
     """
     Function that extracts data from '.mat'-files into a python dictionary
@@ -13,9 +14,10 @@ def load_mat(filename):
     if filename.endswith('.mat'):
         mat_data = sio.loadmat(filename)
         print(f"Your .mat file contains the following variables: {mat_data.keys()}")
-
         return mat_data
-    else: print(f"Please enter a filename ending with .mat")
+    else:
+        print(f"Please enter a filename ending with .mat")
+
 
 def test_controllability(A, B):
     """
@@ -26,10 +28,10 @@ def test_controllability(A, B):
     :return: 'True' or 'False' based on whether the Hautus criteria is satisfied
     """
     #
-    if np.size(A) != np.size(B) or np.size(A,0) != np.size(A,1) or np.size(B,0) != np.size(B,1):
+    if np.size(A) != np.size(B) or np.size(A, 0) != np.size(A, 1) or np.size(B, 0) != np.size(B, 1):
         print("Please use square matrices A and B")
 
-    N = np.size(A,0)
+    N = np.size(A, 0)
     rank_A = matrix_rank(A)
     eig_A = eig(A).eigenvalues
     print(f"Shape of A = {A.shape}")
@@ -37,7 +39,9 @@ def test_controllability(A, B):
     print(f"Rank A = {rank_A}")
 
     all_controllable = all(matrix_rank(np.hstack([A - λ * np.eye(N), B])) == N for λ in eig_A)
-    print(f"\nOverall system is controllable: {all_controllable}") # Always true when B = I --> can add extra check for this to save computations
+    print(
+        f"\nOverall system is controllable: {all_controllable}")  # Always true when B = I --> can add extra check for this to save computations
+
 
 def obj_selector(obj_type, H, U, b, mu=0.1):
     """
@@ -47,19 +51,49 @@ def obj_selector(obj_type, H, U, b, mu=0.1):
     :param mu: regularization parameter
     :return: respective objective function
     """
-    types = ['L1', 'L2', 'LASSO', 'RIDGE']
-    if obj_type not in types: print(f"Please select from: {types}")
-    elif obj_type == 'L1': return cp.Minimize(cp.norm1(U))
-    elif obj_type == 'L2': return cp.Minimize(cp.norm2(H @ U - b))
-    elif obj_type == 'LASSO': return cp.Minimize(cp.norm2(H @ U - b) + mu*cp.norm1(U))
-    elif obj_type == 'RIDGE': return cp.Minimize(cp.norm2(H @ U - b) + mu*cp.norm2(U))
 
-def row_normalizer(A):
+    types = ['L1', 'L2', 'LASSO', 'RIDGE']
+    if obj_type not in types:
+        print(f"Please select from: {types}")
+    elif obj_type == 'L1':
+        return cp.Minimize(cp.norm1(U))
+    elif obj_type == 'L2':
+        return cp.Minimize(cp.norm2(H @ U - b))
+    elif obj_type == 'LASSO':
+        return cp.Minimize(cp.norm2(H @ U - b) + mu * cp.norm1(U))
+    elif obj_type == 'RIDGE':
+        return cp.Minimize(cp.norm2(H @ U - b) + mu * cp.norm2(U))
+
+
+def row_normalizer(A, type="stoch_avg"):
+    """
+    Function that preprocesses a matrix A such that it satisfied certain normalization properties
+
+    :param A: any [N x N] matrix
+    :param type: normalization scheme, choose from: 'row_avg', 'stoch_row'
+    :return: A_bar = normalized A
+    """
     N = A.shape[0]
-    for i in range(N):
-        row_avg = sum(A[i][:])/N
-        A[i][:] = A[i][:]/row_avg
-    return A
+    A_bar = np.zeros([N,N])
+    types = ["row_avg", "stoch_row"]
+    if type not in types: print(f"Please select from: {types}")
+
+    elif type == "row_avg": # ensures row mean = 1
+        for i in range(N):
+            row_avg = sum(A[i][:]) / N
+            A_bar[i][:] = A_bar[i][:] / row_avg
+    elif type == "stoch_row": # ensures rows sum to 1 (bounding)
+        row_sums = A.sum(axis=1, keepdims=True)
+        A_bar = A / np.where(row_sums == 0, 1.0, row_sums)
+
+    return A_bar
+
+def H_normalizer(H, type="column"):
+    norms = np.linalg.norm(H, axis=0, keepdims=True)
+    norms = np.where(norms < 1e-12, 1.0, norms)
+    H_bar = H / norms
+
+    return H_bar, norms
 
 def check_conv(A, x0, xf, U):
     """
@@ -75,7 +109,8 @@ def check_conv(A, x0, xf, U):
     print(f"Error: {err:.2e}")
     return err
 
-def matching_persuit(H, b, s):
+
+def matching_persuit(H, b, max_iter=100):
     """
     Implementation of MP that recovers s-sparse vector u for the model: H u = b
 
@@ -88,30 +123,38 @@ def matching_persuit(H, b, s):
      - u        = Recovered sparse vector (n,)
      - supp     = Indices of non-zero entries in u
     """
+    #b = np.squeeze(b) # (N,1) --> (N,) for size=1 only
+    b = b.ravel() # (N,M) --> (NxM,) for any size
     N = H.shape[1]
     res = b.copy()  # residual
-    supp = []       # support(x)
-    x_supp = []     # x value at support index
+    supp = []  # support(x)
+    u_supp = []  # x value at support index
 
-    for _ in range(s): # Need s iterations for s-sparse recovery generally
+    for i in range(max_iter):  # Need s iterations for s-sparse recovery generally
 
-        correlations = H.T @ res # inproduct or cols H with residual <H_i,r>
-        k = np.argmax(np.abs(correlations)) # select the highest correlated index
-        supp.append(k) # store the index as the support
+        correlations = H.T @ res  # inner-product or cols H with residual <H_i,r>
+        print(f'res={res}')
+        k = np.argmax(np.abs(correlations))  # select the highest correlated index
+        print(f'k={k}')
+        supp.append(k)  # store the index as the support
 
         # subtract the residue (for MP)
         coeff = correlations[k]
-        x_supp.append(coeff)
+        print(f'coeff={coeff}')
+        u_supp.append(coeff)
 
-        res = b - coeff * H[:, k]
+        # H \in [25, 625]
+        res = res - coeff * H[:, k]  # [25,1] - [1,] * [25,1]
 
-        # if np.linalg.norm(res) < 1e-6: break # optional convergence criteria
+        if np.linalg.norm(res) < 1e-6: break  # optional convergence criteria
+        if i == max_iter: print(f"MP did not converge in {max_iter} iterations.")
 
     # recover the full u vector
     u = np.zeros(N)
-    for idx, coeff in zip(supp, x_supp): u[idx] = coeff
+    for idx, coeff in zip(supp, u_supp): u[idx] = coeff
 
     return u, supp
+
 
 def orthogonal_matching_persuit(H, b, s):
     """
@@ -126,30 +169,34 @@ def orthogonal_matching_persuit(H, b, s):
      - u        = Recovered sparse vector (n,)
      - supp     = Indices of non-zero entries in u
     """
+    #b = np.squeeze(b)
+    b = b.ravel()
     N = H.shape[1]
     res = b.copy()  # residual
     supp = []       # support(x)
-    x_supp = None   # x value at support index
+    u_supp = None
 
-    for _ in range(s): # Need s iterations for s-sparse recovery generally
+    for _ in range(s):  # Need s iterations for s-sparse recovery generally
 
-        correlations = H.T @ res # inproduct or cols H with residual <H_i,r>
-        k = np.argmax(np.abs(correlations)) # select the highest correlated index
-        supp.append(k) # store the index as the support
+        correlations = H.T @ res  # inner-product or cols H with residual <H_i,r>
+        k = np.argmax(np.abs(correlations))  # select the highest correlated index
+        supp.append(k)  # store the index as the support
 
         # solve least square, orthogonal projection (for OMP)
         H_selected = H[:, supp]
-        x_supp = np.linalg.pinv(H_selected) @ b # LS on the support
-        # x_supp = np.linalg.lstsq(H[:, supp], b, rcond=None)[0] # can use lstsq function alternatively
+        u_supp = np.linalg.pinv(H_selected) @ b  # LS on the support
+        # u_supp = np.linalg.lstsq(H[:, supp], b, rcond=None)[0] # can use lstsq function alternatively
+        print(f'u_supp={u_supp}')
 
-        res = b - H_selected
+        res = b - H_selected @ u_supp
 
-        if np.linalg.norm(res) < 1e-6: break # optional convergence criteria
+        # if np.linalg.norm(res) < 1e-6: break # optional convergence criteria
 
     # recover the full u vector
     u = np.zeros(N)
-    for idx, coeff in zip(supp, x_supp): u[idx] = coeff
-
+    print(f'supp={supp}')
+    for idx, coeff in zip(supp, u_supp): u[idx] = coeff # The final u_LS contains the LS estimates over the full support of u
+    print(f'u={u}')
     return u, supp
 
 def optimize_input(A, x0, xf, s, K, u_max=None, method='L1'):
@@ -168,15 +215,20 @@ def optimize_input(A, x0, xf, s, K, u_max=None, method='L1'):
     outputs:
      - 'U'      = optimal s-sparse vector
     """
-    np.random.seed(1) # set seed for reproducability
-    N = A.shape[0] # extract dimensions from input
+    np.random.seed(1)  # set seed for reproducability
+    N = A.shape[0]  # extract dimensions from input
 
     # Build controllability matrix --> TODO: can also update H recursively to save memory and computation time
     H_list = [np.linalg.matrix_power(A, K - i - 1) for i in range(K)]
+    print(f'H_list= [{np.shape(H_list)}]')
     H = np.hstack(H_list)
-    b = xf - np.linalg.matrix_power(A, N) @ x0
+    print(f'H= [{np.shape(H)}]')
+    b = xf - np.linalg.matrix_power(A, K) @ x0
+    print(f'b=[{b.shape}]')
 
-    if method == 'L1' or 'L2' or 'LASSO' or 'RIDGE':
+    H,norms = H_normalizer(H) # We column-normalize H to equalize the horizon (since it tends to give higher values the lower the index)
+
+    if method in ('L1', 'L2', 'LASSO', 'RIDGE'):
     # Standard Basis Persuit
         U = cp.Variable(N * K) # U is a stacked vector of size [N x K]
         objective = obj_selector(method, H, U, b, mu=0.1) # Get respective objective function from wrapper (using entrywise norms)
@@ -191,12 +243,12 @@ def optimize_input(A, x0, xf, s, K, u_max=None, method='L1'):
             ])
 
         problem = cp.Problem(objective, constraints)
-        opt_cost = problem.solve(solver=cp.OSQP) # The optimal objective value is returned by `prob.solve()`.
+        opt_cost = problem.solve(solver=cp.SCS) # The optimal objective value is returned by `prob.solve()`.
 
         U = U.value # The optimal value for u is stored in `u.value`.
 
     elif method == 'MP':
-        U = matching_persuit(H, b, s)[0]
+        U = matching_persuit(H, b)[0]
     elif method == 'OMP_ref':
         omp = OrthogonalMatchingPursuit(n_nonzero_coefs=min(10, K))
         omp.fit(H.T, b)
@@ -207,13 +259,30 @@ def optimize_input(A, x0, xf, s, K, u_max=None, method='L1'):
         U = None
     elif method == 'COSAMP':
         U = None
-    return U.value.reshape(N, K, order='F')
+    return U/norms.ravel()  # .reshape(N, K, order='F')
+
 
 def main():
     mat_data = load_mat('PiecewiseSparse.mat')
-    A = mat_data['A']; xf = mat_data['FinalState'] # First off, note that A contains self loops (nonzero diag.) and both positive and negative values (directional)
-    N = np.size(A,0)
+    A = mat_data['A']
+    Xf = mat_data[
+        'FinalState']  # First off, note that A contains self loops (nonzero diag.) and both positive and negative values (directional)
+
+    #A = row_normalizer(A)
+
+    N = np.size(A, 0)
     test_controllability(A, np.eye(N))
+
+    x0 = np.random.randn(25, 1)
+
+    print(Xf.shape[0])
+
+    # for i in range(Xf.shape[0]):
+    xf = Xf[5, :].reshape(25, 1)
+    s = 10
+    K = 25
+    optimize_input(A, x0, xf, s, K, method='OMP')
+
 
 if __name__ == '__main__':
     main()
